@@ -1,72 +1,32 @@
-# 🔍 Face Search Standalone v2.0
+# 🛡️ Face Search — Standalone Camera Monitor (v3.0)
 
-A high-performance, fully standalone face recognition service powered by **ArcFace (InsightFace)** and **FAISS**.
+A high-performance, standalone face recognition system designed to monitor a CCTV feed, detect faces in a specific "Watch Zone," and log matches directly to an MS SQL database.
 
-This service allows enrollment and identification of employees independently of the main RTSP recognition system, while sharing the same MS SQL database and embedding tables.
+## ✨ Key Features
+- **Watch Zone (ROI)**: Define a specific area of the screen to monitor, ignoring background movement.
+- **Consensus Matching**: Requires a person to be seen multiple times (3/6 frames) before logging, ensuring near 100% accuracy.
+- **Auto-Reconnect**: Watchdog logic automatically restarts the camera stream if it drops.
+- **Automatic Cleanup**: Keeps the database light by automatically deleting logs older than 1 day.
+- **GPU Accelerated**: Uses NVIDIA CUDA for real-time inference.
 
----
+## 🚀 Quick Start
+1.  **Configure**: Open `.env` and set your `RTSP_URL` and `MSSQL` credentials.
+2.  **Launch**: Double-click `start.bat`.
+3.  **Monitor**: The system will open a window showing the detection. Press **'Q'** to hide the window and continue running in the background.
 
-## ⚡ Main Features
+## ⚙️ Configuration (.env)
+| Setting | Description |
+| :--- | :--- |
+| `RTSP_URL` | Your camera stream URL. |
+| `LOG_COOLDOWN` | Seconds to wait before logging the same person again (default: 600s/10m). |
+| `RETENTION_DAYS` | Automatically delete logs older than this many days (default: 1). |
+| `ROI_TOP/LEFT/etc` | Define the percentage (0-100) of the screen to monitor. |
 
-- **Standalone Live Camera**: Built-in RTSP monitoring thread with MJPEG streaming.
-- **Dynamic Enrollment**: Enroll employees via image upload or direct capture from the RTSP stream.
-- **Live Search**: "Grab & Search" functionality to identify who is currently in front of the camera.
-- **Dual Interface**:
-    - **Interactive Dashboard**: Modern web interface at `http://localhost:8001/`
-    - **REST API**: Full OpenAPI documentation at `http://localhost:8001/docs`
-- **FAISS Persistence**: Automatic sync of the vector index to MS SQL for disaster recovery.
-- **Zero Configuration Conflict**: Runs on port **8001**, allowing it to co-exist with the main system (port 8000).
-
----
-
-## 📂 Directory Structure
-
-```text
-face_search/
-├── app.py            ← FastAPI Standalone Service (v2.0)
-├── database.py       ← MS SQL CRUD + FAISS SQL Blob Sync
-├── engine.py         ← ArcFace + FAISS Core Logic
-├── config.py         ← Centralized Settings (Shared .env)
-├── silencer.py       ← Suppress ORT C++ Console Logs
-├── .env              ← Environment Variables
-├── start.bat         ← One-click Launcher
-└── data/
-    └── faiss_hnsw.index   ← Local FAISS Cache
-```
+## 🛠️ Architecture
+- **`face_check.py`**: Main entry point and camera loop.
+- **`engine.py`**: ArcFace / InsightFace AI logic.
+- **`database.py`**: MS SQL connection and logging.
+- **`config.py`**: Environment variable loader.
 
 ---
-
-## 🚀 Getting Started
-
-1. **Configure Camera**: Open `.env` and set your `RTSP_URL`.
-2. **Start Service**:
-   ```bat
-   cd face_search
-   start.bat
-   ```
-3. **Access Dashboard**: Open `http://localhost:8001/` in your browser.
-
----
-
-## 🛠 API Endpoints
-
-### `POST /enroll`
-Enroll a new employee. If `file` is omitted, the service grabs a frame from the live RTSP stream.
-
-### `POST /search`
-Upload an image to identify an employee.
-
-### `POST /search/live`
-Instantly grab the current frame from the camera and identify the person.
-
-### `GET /stream`
-RTSP camera stream with real-time face bounding boxes and names.
-
----
-
-## ⚙️ How it Works
-
-1. **Thread-Safe Camera**: A background thread continuously reads from the RTSP stream to ensure zero lag.
-2. **ArcFace Pipeline**: Faces are detected using SCRFD and aligned to 112x112 landmarks for maximum ArcFace accuracy.
-3. **HNSW Indexed Search**: Uses FAISS HNSW (Hierarchical Navigable Small World) for sub-millisecond similarity search even as the database grows.
-4. **SQL Sync**: When an employee is enrolled, their embeddings are saved to the `employees` table, and the updated FAISS index is backed up to the `faiss_index` table.
+*Standalone version — No API or Frontend required.*
