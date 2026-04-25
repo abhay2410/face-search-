@@ -74,8 +74,10 @@ if not RTSP_URLS:
 RTSP_URL = RTSP_URLS[0]
 
 # ── Service ───────────────────────────────────────────────────────────────────
+LOG_COOLDOWN = int(os.getenv("LOG_COOLDOWN", "30"))
 
 API_HOST      = os.getenv("API_HOST",      "0.0.0.0")
+
 API_PORT      = int(os.getenv("API_PORT",  "8001"))
 AUTH_USERNAME = os.getenv("AUTH_USERNAME", "admin")
 AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "1234")
