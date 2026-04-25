@@ -528,8 +528,11 @@ def _clear_old_detections_sync():
     try:
         conn = _get_conn()
         cur = conn.cursor()
-        # Delete rows where the date is older than today
-        cur.execute("DELETE FROM detection_history WHERE CAST(detected_at AS DATE) < CAST(GETDATE() AS DATE)")
+        # Delete rows older than RETENTION_DAYS
+        cur.execute(
+            "DELETE FROM detection_history WHERE detected_at < DATEADD(day, -?, GETDATE())",
+            (config.RETENTION_DAYS,)
+        )
         count = cur.rowcount
         conn.commit()
         if count > 0:

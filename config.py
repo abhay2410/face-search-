@@ -74,7 +74,14 @@ if not RTSP_URLS:
 RTSP_URL = RTSP_URLS[0]
 
 # ── Service ───────────────────────────────────────────────────────────────────
-LOG_COOLDOWN = int(os.getenv("LOG_COOLDOWN", "30"))
+LOG_COOLDOWN   = int(os.getenv("LOG_COOLDOWN",   "600"))
+RETENTION_DAYS = int(os.getenv("RETENTION_DAYS", "1"))
+
+# ── ROI ───────────────────────────────────────────────────────────────────────
+ROI_TOP    = int(os.getenv("ROI_TOP",    "0"))
+ROI_BOTTOM = int(os.getenv("ROI_BOTTOM", "100"))
+ROI_LEFT   = int(os.getenv("ROI_LEFT",   "0"))
+ROI_RIGHT  = int(os.getenv("ROI_RIGHT",  "100"))
 
 API_HOST      = os.getenv("API_HOST",      "0.0.0.0")
 
