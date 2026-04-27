@@ -18,6 +18,9 @@ from collections import deque
 from pathlib import Path
 
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "-8" # Quiet
+os.environ["OPENCV_LOG_LEVEL"] = "SILENT"
+os.environ["OPENCV_VIDEOIO_DEBUG"] = "0"
 
 import cv2
 import numpy as np
