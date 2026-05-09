@@ -56,6 +56,8 @@ ONBOARD_FRAMES = int(os.getenv("ONBOARD_FRAMES", "20"))
 
 # ── Matching Logic Filters ────────────────────────────────────────────────────
 
+IOU_THRESHOLD       = float(os.getenv("IOU_THRESHOLD",     "0.4"))
+TRACKER_MAX_AGE     = int(os.getenv("TRACKER_MAX_AGE",     "5"))
 FACE_MIN_SIZE       = int(os.getenv("FACE_MIN_SIZE",       "60"))
 BLUR_THRESHOLD      = float(os.getenv("BLUR_THRESHOLD",    "45.0"))
 CONSENSUS_WINDOW    = int(os.getenv("CONSENSUS_WINDOW",    "6"))

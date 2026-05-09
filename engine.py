@@ -116,21 +116,27 @@ def _make_analyzer(det_size: tuple, det_thresh: float) -> FaceAnalysis:
 
 # ═════════════════════════ (Rest of file remains highly optimized) ════════════
 
-_analyzer: Optional[FaceAnalysis] = None
+_analyzer_monitor: Optional[FaceAnalysis] = None
+_analyzer_enrol:   Optional[FaceAnalysis] = None
 
 def _get_analyzer(enrol_mode: bool = False) -> FaceAnalysis:
     """
-    Unified analyzer to save VRAM. 
-    Loads a single 640x640 instance that handles both monitoring and enrollment.
+    Dual-analyzer strategy to save GPU/CPU cycles during monitoring.
     """
-    global _analyzer
-    if _analyzer is None:
-        log.info("[Engine] Loading Unified FaceAnalysis (%dx%d) on %s...", 
-                 config.ARC_FACE_DET_SIZE_ENROL[0], config.ARC_FACE_DET_SIZE_ENROL[1], _device_str)
-        # Using Enrol size (640x640) as default for better detection of distant faces
-        _analyzer = _make_analyzer(config.ARC_FACE_DET_SIZE_ENROL, det_thresh=config.DET_THRESHOLD)
-        log.info("[Engine] Unified Engine Ready (Threshold: %.2f)", config.DET_THRESHOLD)
-    return _analyzer
+    global _analyzer_monitor, _analyzer_enrol
+
+    if enrol_mode:
+        if _analyzer_enrol is None:
+            size = config.ARC_FACE_DET_SIZE_ENROL
+            log.info("[Engine] Loading Enrolment FaceAnalysis (%dx%d) on %s...", size[0], size[1], _device_str)
+            _analyzer_enrol = _make_analyzer(size, det_thresh=config.DET_THRESHOLD)
+        return _analyzer_enrol
+    else:
+        if _analyzer_monitor is None:
+            size = config.ARC_FACE_DET_SIZE_MONITOR
+            log.info("[Engine] Loading Monitoring FaceAnalysis (%dx%d) on %s...", size[0], size[1], _device_str)
+            _analyzer_monitor = _make_analyzer(size, det_thresh=config.DET_THRESHOLD)
+        return _analyzer_monitor
 
 # --- (Diversity Selection / FAISS logic from previous successful version keeps running) ---
 
@@ -174,15 +180,14 @@ async def load_index():
             _index, _index_ids = faiss.IndexFlatIP(config.EMBEDDING_DIM), []
             return
             
-        log.info("[Engine] Building HNSW index with %d vectors...", len(all_vecs))
-        _index = faiss.IndexHNSWFlat(config.EMBEDDING_DIM, config.HNSW_M, faiss.METRIC_INNER_PRODUCT)
-        _index.hnsw.efSearch = config.HNSW_EF_SEARCH
+        log.info("[Engine] Building FlatIP index with %d vectors...", len(all_vecs))
+        _index = faiss.IndexFlatIP(config.EMBEDDING_DIM)
         
         log.info("[Engine] Adding vectors to FAISS index...")
         _index.add(np.vstack(all_vecs).astype(np.float32))
         _index_ids = new_ids
         
-        save_path = os.path.join(config.BASE_DIR, "data", "faiss_hnsw.index")
+        save_path = os.path.join(config.BASE_DIR, "data", "faiss_flat.index")
         os.makedirs(os.path.join(config.BASE_DIR, "data"), exist_ok=True)
         log.info("[Engine] Saving index to %s...", save_path)
         try:
@@ -201,7 +206,7 @@ async def load_index():
 async def load_index_from_disk() -> bool:
     global _index, _index_ids
     import database as db
-    p = os.path.join(config.BASE_DIR, "data", "faiss_hnsw.index")
+    p = os.path.join(config.BASE_DIR, "data", "faiss_flat.index")
     
     # 1. Try SQL first if disk is missing (satisfies "kept in SQL" request)
     if not os.path.exists(p):
@@ -251,7 +256,7 @@ def _add_to_index_sync(employee_id: int, embeddings: Union[np.ndarray, List[np.n
         _index_ids.append(employee_id)
     _index.add(np.vstack(vecs).astype(np.float32))
     
-    path = os.path.join(config.BASE_DIR, "data", "faiss_hnsw.index")
+    path = os.path.join(config.BASE_DIR, "data", "faiss_flat.index")
     faiss.write_index(_index, path)
     
     # Keep SQL in sync
@@ -264,26 +269,52 @@ def _add_to_index_sync(employee_id: int, embeddings: Union[np.ndarray, List[np.n
         log.error("[Engine] Failed to sync incremental index to SQL: %s", e)
 
 def search_index_multi(embeddings: np.ndarray) -> List[Tuple[Optional[int], float]]:
-    if _index is None or _index.ntotal == 0 or len(embeddings) == 0: return [(None, 0.0)]*len(embeddings)
+    if _index is None or _index.ntotal == 0 or len(embeddings) == 0:
+        return [(None, 0.0)] * len(embeddings)
+
+    # 1. Normalise queries for Inner Product (Cosine Similarity)
     queries = embeddings.astype(np.float32)
-    norms = np.linalg.norm(queries, axis=1, keepdims=True); np.divide(queries, norms, out=queries, where=norms!=0)
-    k_search = min(config.MULTI_EMB_COUNT + 2, _index.ntotal)
+    norms = np.linalg.norm(queries, axis=1, keepdims=True)
+    np.divide(queries, norms, out=queries, where=norms != 0)
+
+    # 2. Batch Search
+    # Search for more neighbours to ensure we find different employee IDs for the gap check
+    k_search = min(config.MULTI_EMB_COUNT * 2 + 5, _index.ntotal)
     D, I = _index.search(queries, k_search)
+
     results = []
     for q in range(len(embeddings)):
+        # map: employee_id -> max_score
         scores_by_id = {}
         for rank in range(k_search):
             idx = int(I[q][rank])
             if 0 <= idx < len(_index_ids):
                 eid, score = _index_ids[idx], float(D[q][rank])
-                if eid not in scores_by_id or score > scores_by_id[eid]: scores_by_id[eid] = score
-        if not scores_by_id: results.append((None, 0.0)); continue
+                if eid not in scores_by_id or score > scores_by_id[eid]:
+                    scores_by_id[eid] = score
+
+        if not scores_by_id:
+            results.append((None, 0.0))
+            continue
+
+        # Sort IDs by their best score
         ranked = sorted(scores_by_id.items(), key=lambda x: x[1], reverse=True)
         top_id, top_score = ranked[0]
+
+        # Accuracy Check: Score Gap
+        # If the difference between the best match and the next best employee is too small,
+        # it's an ambiguous match (high risk of false positive).
         second_score = ranked[1][1] if len(ranked) > 1 else 0.0
-        if top_score < config.FAISS_COSINE_THRESHOLD or (top_score - second_score < _MIN_SCORE_GAP and second_score > 0): 
+        gap = top_score - second_score
+
+        if top_score < config.FAISS_COSINE_THRESHOLD:
             results.append((None, top_score))
-        else: results.append((top_id, top_score))
+        elif second_score > 0 and gap < _MIN_SCORE_GAP:
+            # log.debug("[Engine] Match rejected due to small score gap: %.3f", gap)
+            results.append((None, top_score))
+        else:
+            results.append((top_id, top_score))
+
     return results
 
 def search_index(emb: np.ndarray) -> Tuple[Optional[int], float]:
@@ -335,6 +366,7 @@ async def extract_embedding(image: Union[bytes, np.ndarray]) -> Optional[np.ndar
 
 async def close_engine():
     """Release engine resources on shutdown."""
-    global _analyzer
-    _analyzer = None
+    global _analyzer_monitor, _analyzer_enrol
+    _analyzer_monitor = None
+    _analyzer_enrol = None
     log.info("[Engine] Resources released.")
