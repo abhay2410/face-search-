@@ -16,6 +16,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union
 
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
 os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "-8" # Quiet
@@ -87,7 +88,74 @@ class VideoStream:
         if self.cap: self.cap.release()
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  2. Consensus Tracker
+#  2. Box Tracker (IOU-based)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TrackedFace:
+    def __init__(self, bbox, track_id):
+        self.bbox = bbox  # [x1, y1, x2, y2]
+        self.track_id = track_id
+        self.age = 0
+        self.hits = 0
+        self.consensus = ConsensusTracker(
+            threshold=config.CONSENSUS_THRESHOLD,
+            window_size=config.CONSENSUS_WINDOW
+        )
+        self.last_emp_id = None
+        self.last_confidence = 0.0
+
+class BoxTracker:
+    def __init__(self, iou_threshold=config.IOU_THRESHOLD, max_age=config.TRACKER_MAX_AGE):
+        self.iou_threshold = iou_threshold
+        self.max_age = max_age
+        self.tracks: List[TrackedFace] = []
+        self.next_id = 0
+
+    def _iou(self, boxA, boxB):
+        xA = max(boxA[0], boxB[0]); yA = max(boxA[1], boxB[1])
+        xB = min(boxA[2], boxB[2]); yB = min(boxA[3], boxB[3])
+        interArea = max(0, xB - xA) * max(0, yB - yA)
+        if interArea == 0: return 0.0
+        boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
+        boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
+        return interArea / float(boxAArea + boxBArea - interArea)
+
+    def update(self, detections: List[np.ndarray]):
+        # detections: list of [x1, y1, x2, y2]
+        new_tracks = []
+        matched_indices = set()
+
+        for track in self.tracks:
+            track.age += 1
+            best_iou = -1.0
+            best_idx = -1
+            for i, det in enumerate(detections):
+                if i in matched_indices: continue
+                iou = self._iou(track.bbox, det)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_idx = i
+
+            if best_iou >= self.iou_threshold:
+                track.bbox = detections[best_idx]
+                track.age = 0
+                track.hits += 1
+                matched_indices.add(best_idx)
+                new_tracks.append(track)
+            elif track.age <= self.max_age:
+                new_tracks.append(track)
+
+        for i, det in enumerate(detections):
+            if i not in matched_indices:
+                new_track = TrackedFace(det, self.next_id)
+                self.next_id += 1
+                new_tracks.append(new_track)
+
+        self.tracks = new_tracks
+        return self.tracks
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  3. Consensus Tracker
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ConsensusTracker:
@@ -145,9 +213,9 @@ async def run(camera_source, threshold: float, cooldown: int, show_window: bool)
     vs = VideoStream(camera_source).start()
     time.sleep(2.0)
     
-    trackers: dict[int, ConsensusTracker] = {}
+    tracker = BoxTracker()
     cooldown_map: dict[int, float] = {}
-    PROCESS_EVERY = 3
+    PROCESS_EVERY = 2 # Increased frequency due to resolution optimization
     frame_idx = 0
 
     log.info("System Ready. Watch Zone: T:%d%% B:%d%% L:%d%% R:%d%%", 
@@ -159,44 +227,71 @@ async def run(camera_source, threshold: float, cooldown: int, show_window: bool)
             await asyncio.sleep(0.01)
             continue
 
+        frame_idx += 1
+        if frame_idx % PROCESS_EVERY != 0:
+            await asyncio.sleep(0)
+            continue
+
         h, w = full_frame.shape[:2]
         rx1, ry1, rx2, ry2 = get_roi_coords(h, w)
         
         # CROP to Region of Interest
         roi_frame = full_frame[ry1:ry2, rx1:rx2]
-
-        frame_idx += 1
         display = full_frame.copy() if show_window else None
 
-        if frame_idx % PROCESS_EVERY == 0:
-            # Detect faces ONLY in the ROI frame
-            faces = await engine.extract_faces_full(roi_frame)
+        # 1. Detect faces ONLY in the ROI frame (using MONITOR resolution)
+        faces = await engine.extract_faces_full(roi_frame, enrol_mode=False)
 
-            for face_info in faces:
-                bbox, embedding = face_info["bbox"], face_info["embedding"]
-                
+        # 2. Update Tracker
+        detections = [f["bbox"] for f in faces]
+        tracks = tracker.update(detections)
+
+        # 3. Filter valid tracks and collect embeddings for batch search
+        valid_tracks = []
+        embeddings_to_search = []
+
+        for track in tracks:
+            # Find the face info corresponding to this track's current bbox
+            face_info = next((f for f in faces if np.array_equal(f["bbox"], track.bbox)), None)
+
+            if face_info:
+                bbox = face_info["bbox"]
                 # Filter small faces
                 if (bbox[2]-bbox[0]) < config.FACE_MIN_SIZE: continue
                 
                 # Check blur
                 face_crop = roi_frame[max(0, int(bbox[1])):int(bbox[3]), max(0, int(bbox[0])):int(bbox[2])]
                 is_sharp, _ = engine.check_blur(face_crop)
-                if not is_sharp: continue
+                if not is_sharp:
+                    track.consensus.add_match(None) # Record a "no-match" for blur
+                    continue
 
-                emp_id, confidence = engine.search_index(embedding)
+                valid_tracks.append(track)
+                embeddings_to_search.append(face_info["embedding"])
+            else:
+                # Track was not matched in this frame (age > 0)
+                pass
+
+        # 4. Batch search embeddings
+        if embeddings_to_search:
+            search_results = engine.search_index_multi(np.array(embeddings_to_search))
+
+            for track, (emp_id, confidence) in zip(valid_tracks, search_results):
                 matched = emp_id is not None and confidence >= threshold
 
+                # Update track state
+                track.last_emp_id = emp_id if matched else None
+                track.last_confidence = confidence if matched else 0.0
+
+                # 5. Consensus Check
+                is_confirmed = track.consensus.add_match(emp_id if matched else None)
+
                 if matched:
-                    if emp_id not in trackers:
-                        trackers[emp_id] = ConsensusTracker(threshold=3, window_size=6)
-                    
-                    is_confirmed = trackers[emp_id].add_match(emp_id)
-                    
                     emp = await db.get_employee_by_id(emp_id)
                     name = emp["name"] if emp else f"ID:{emp_id}"
                     emp_code = emp.get("employee_code", "") if emp else ""
 
-                    if show_window: draw_result(display, bbox, name, confidence, matched=True, offset_x=rx1, offset_y=ry1)
+                    if show_window: draw_result(display, track.bbox, name, confidence, matched=True, offset_x=rx1, offset_y=ry1)
 
                     if is_confirmed:
                         now = time.monotonic()
@@ -204,9 +299,19 @@ async def run(camera_source, threshold: float, cooldown: int, show_window: bool)
                             cooldown_map[emp_id] = now
                             # Log detection with the FULL frame for context
                             asyncio.create_task(db.log_detection(emp_id, emp_code, name, round(confidence, 4), frame_to_base64(full_frame)))
-                            log.info("✅ CONFIRMED %-15s Score=%.3f", name, confidence)
+                            log.info("✅ CONFIRMED %-15s Score=%.3f (Track %d)", name, confidence, track.track_id)
                 else:
-                    if show_window: draw_result(display, bbox, "Unknown", 0.0, matched=False, offset_x=rx1, offset_y=ry1)
+                    if show_window: draw_result(display, track.bbox, "Unknown", 0.0, matched=False, offset_x=rx1, offset_y=ry1)
+
+        # Draw stale tracks (those not updated this frame)
+        if show_window:
+            for track in tracks:
+                if track not in valid_tracks and track.age > 0:
+                    name = "..."
+                    if track.last_emp_id:
+                        emp = await db.get_employee_by_id(track.last_emp_id)
+                        name = emp["name"] if emp else f"ID:{track.last_emp_id}"
+                    draw_result(display, track.bbox, name, track.last_confidence, matched=track.last_emp_id is not None, offset_x=rx1, offset_y=ry1)
 
         if show_window:
             # Draw the ROI boundary for visual reference
