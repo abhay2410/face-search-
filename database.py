@@ -15,6 +15,8 @@ import asyncio
 import logging
 import threading
 import time
+import cv2
+import base64
 from functools import partial, wraps
 from typing import Dict, List, Optional
 
@@ -246,8 +248,19 @@ def _init_db_sync():
                     name            NVARCHAR(255),
                     confidence      FLOAT,
                     base64_image    NVARCHAR(MAX),
-                    detected_at     DATETIME DEFAULT CURRENT_TIMESTAMP
+                    detected_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    queue_position  INT DEFAULT 0
                 )
+            END
+            ELSE
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT * FROM sys.columns
+                    WHERE object_id = OBJECT_ID('detection_history') AND name = 'queue_position'
+                )
+                BEGIN
+                    ALTER TABLE detection_history ADD queue_position INT DEFAULT 0
+                END
             END
         """)
         conn.commit()
@@ -464,26 +477,32 @@ async def log_search(employee_id: Optional[int], employee_code: Optional[str], c
     )
 
 
-def _log_detection_sync(employee_id: int, employee_code: str, name: str, confidence: float, base64_image: str):
+def _log_detection_sync(employee_id: int, employee_code: str, name: str, confidence: float, frame_or_b64, queue_position: int = 0):
     """Internal sync logger for detailed detections with images."""
     try:
+        if isinstance(frame_or_b64, np.ndarray):
+            ok, buf = cv2.imencode(".jpg", frame_or_b64, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            base64_image = base64.b64encode(buf.tobytes()).decode("utf-8") if ok else ""
+        else:
+            base64_image = frame_or_b64
+
         conn = _get_conn()
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO detection_history (employee_id, employee_code, name, confidence, base64_image) VALUES (?,?,?,?,?)",
-            (employee_id, employee_code, name, confidence, base64_image),
+            "INSERT INTO detection_history (employee_id, employee_code, name, confidence, base64_image, queue_position) VALUES (?,?,?,?,?,?)",
+            (employee_id, employee_code, name, confidence, base64_image, queue_position),
         )
         conn.commit()
     except Exception as exc:
         log.error("[DB] Detection log write failed: %s", exc)
 
 
-async def log_detection(employee_id: int, employee_code: str, name: str, confidence: float, base64_image: str):
+async def log_detection(employee_id: int, employee_code: str, name: str, confidence: float, frame_or_b64, queue_position: int = 0):
     """Fire-and-forget detailed detection log with image."""
     loop = asyncio.get_event_loop()
     loop.run_in_executor(
         None,
-        partial(_log_detection_sync, employee_id, employee_code, name, confidence, base64_image),
+        partial(_log_detection_sync, employee_id, employee_code, name, confidence, frame_or_b64, queue_position),
     )
 
 
@@ -494,7 +513,7 @@ def _get_recent_matches_sync(limit: int = 20) -> list:
         cur = conn.cursor()
         cur.execute("""
             SELECT TOP (?) 
-                id, employee_id, employee_code, name, confidence, base64_image, detected_at
+                id, employee_id, employee_code, name, confidence, base64_image, detected_at, queue_position
             FROM detection_history
             ORDER BY detected_at DESC
         """, (limit,))
@@ -510,7 +529,8 @@ def _get_recent_matches_sync(limit: int = 20) -> list:
                 "confidence": r[4],
                 "base64_image": r[5],
                 "time": r[6].strftime("%H:%M:%S") if r[6] else "",
-                "ts": r[6].timestamp() if r[6] else 0
+                "ts": r[6].timestamp() if r[6] else 0,
+                "queue_position": r[7] if len(r) > 7 else 0
             })
         return results
     except Exception as exc:

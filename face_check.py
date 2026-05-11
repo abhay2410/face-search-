@@ -118,7 +118,7 @@ def frame_to_base64(frame: np.ndarray) -> str:
     ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
     return base64.b64encode(buf.tobytes()).decode("utf-8") if ok else ""
 
-def draw_result(frame: np.ndarray, bbox, name: str, confidence: float, matched: bool, offset_x=0, offset_y=0):
+def draw_result(frame: np.ndarray, bbox, name: str, confidence: float, matched: bool, offset_x=0, offset_y=0, distance_str=""):
     x1, y1, x2, y2 = [int(v) for v in bbox]
     # Add ROI offsets to draw on the original full frame
     x1 += offset_x; x2 += offset_x
@@ -126,7 +126,7 @@ def draw_result(frame: np.ndarray, bbox, name: str, confidence: float, matched: 
     
     color = (0, 220, 0) if matched else (0, 80, 255)
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-    label = f"{name} {confidence * 100:.1f}%" if matched else "Unknown"
+    label = f"{name} {confidence * 100:.1f}%{distance_str}" if matched else f"Unknown{distance_str}"
     (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
     cv2.rectangle(frame, (x1, y1 - th - 10), (x1 + tw + 6, y1), color, -1)
     cv2.putText(frame, label, (x1 + 3, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
@@ -172,19 +172,34 @@ async def run(camera_source, threshold: float, cooldown: int, show_window: bool)
             # Detect faces ONLY in the ROI frame
             faces = await engine.extract_faces_full(roi_frame)
 
+            # Filter, sort faces by closeness (bbox_width)
+            valid_faces = []
             for face_info in faces:
-                bbox, embedding = face_info["bbox"], face_info["embedding"]
+                bbox = face_info["bbox"]
+                bbox_width = bbox[2] - bbox[0]
                 
                 # Filter small faces
-                if (bbox[2]-bbox[0]) < config.FACE_MIN_SIZE: continue
+                if bbox_width < config.FACE_MIN_SIZE: continue
                 
                 # Check blur
                 face_crop = roi_frame[max(0, int(bbox[1])):int(bbox[3]), max(0, int(bbox[0])):int(bbox[2])]
                 is_sharp, _ = engine.check_blur(face_crop)
                 if not is_sharp: continue
 
+                face_info["bbox_width"] = bbox_width
+                valid_faces.append(face_info)
+
+            # Sort faces by width (largest/closest first)
+            valid_faces.sort(key=lambda x: x["bbox_width"], reverse=True)
+
+            for idx, face_info in enumerate(valid_faces):
+                bbox, embedding = face_info["bbox"], face_info["embedding"]
+                
                 emp_id, confidence = engine.search_index(embedding)
                 matched = emp_id is not None and confidence >= threshold
+
+                # Show only the rank number based on closeness
+                rank_str = f" [#{idx+1}]"
 
                 if matched:
                     if emp_id not in trackers:
@@ -196,17 +211,17 @@ async def run(camera_source, threshold: float, cooldown: int, show_window: bool)
                     name = emp["name"] if emp else f"ID:{emp_id}"
                     emp_code = emp.get("employee_code", "") if emp else ""
 
-                    if show_window: draw_result(display, bbox, name, confidence, matched=True, offset_x=rx1, offset_y=ry1)
+                    if show_window: draw_result(display, bbox, name, confidence, matched=True, offset_x=rx1, offset_y=ry1, distance_str=rank_str)
 
                     if is_confirmed:
                         now = time.monotonic()
                         if now - cooldown_map.get(emp_id, 0.0) >= cooldown:
                             cooldown_map[emp_id] = now
                             # Log detection with the FULL frame for context
-                            asyncio.create_task(db.log_detection(emp_id, emp_code, name, round(confidence, 4), frame_to_base64(full_frame)))
-                            log.info("✅ CONFIRMED %-15s Score=%.3f", name, confidence)
+                            asyncio.create_task(db.log_detection(emp_id, emp_code, name, round(confidence, 4), full_frame, idx + 1))
+                            log.info("✅ CONFIRMED %-15s Score=%.3f Rank=%s", name, confidence, rank_str.strip())
                 else:
-                    if show_window: draw_result(display, bbox, "Unknown", 0.0, matched=False, offset_x=rx1, offset_y=ry1)
+                    if show_window: draw_result(display, bbox, "Unknown", 0.0, matched=False, offset_x=rx1, offset_y=ry1, distance_str=rank_str)
 
         if show_window:
             # Draw the ROI boundary for visual reference
@@ -224,6 +239,25 @@ async def run(camera_source, threshold: float, cooldown: int, show_window: bool)
     vs.release()
 
 def main():
+    import licensing
+    import config
+
+    # 1. Initial Validation
+    ok, msg, data = licensing.validate_license(config.LICENSE_FILE)
+    
+    # 2. If invalid, show the GUI dialog to enter a key
+    if not ok:
+        log.warning("License check failed: %s. Opening activation dialog...", msg)
+        licensing.show_activation_dialog(config.LICENSE_FILE)
+        
+        # 3. Re-verify after dialog closes
+        ok, msg, data = licensing.validate_license(config.LICENSE_FILE)
+        if not ok:
+            log.error("Still no valid license found. Exiting.")
+            sys.exit(1)
+
+    log.info("License Verified for: %s (Expires: %s)", data['customer'], data['expiry'])
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--camera", default=config.RTSP_URL)
     parser.add_argument("--no-window", action="store_true")

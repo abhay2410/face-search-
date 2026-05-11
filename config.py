@@ -18,14 +18,16 @@ else:
 env_path = os.path.join(BASE_DIR, ".env")
 load_dotenv(env_path)
 
+LICENSE_FILE = os.path.join(BASE_DIR, "license.key")
+
 # ── MS SQL Server ─────────────────────────────────────────────────────────────
 
-MSSQL_SERVER     = os.getenv("MSSQL_SERVER",   "192.168.0.251,1433")
-MSSQL_USER       = os.getenv("MSSQL_USER",     "sa")
-MSSQL_PASSWORD   = os.getenv("MSSQL_PASSWORD", "sa@123")
-MSSQL_DB         = os.getenv("MSSQL_DB",       "face_attendance")
-MSSQL_DRIVER     = os.getenv("MSSQL_DRIVER",   "ODBC Driver 18 for SQL Server")
-MSSQL_TRUST_CERT = os.getenv("MSSQL_TRUST_CERT", "yes")
+MSSQL_SERVER     = "192.168.0.251,1433"
+MSSQL_USER       = "sa"
+MSSQL_PASSWORD   = "sa@123"
+MSSQL_DB         = "face_attendance"
+MSSQL_DRIVER     = "ODBC Driver 18 for SQL Server"
+MSSQL_TRUST_CERT = "yes"
 
 # ── Face Recognition ──────────────────────────────────────────────────────────
 
@@ -60,6 +62,12 @@ FACE_MIN_SIZE       = int(os.getenv("FACE_MIN_SIZE",       "60"))
 BLUR_THRESHOLD      = float(os.getenv("BLUR_THRESHOLD",    "45.0"))
 CONSENSUS_WINDOW    = int(os.getenv("CONSENSUS_WINDOW",    "6"))
 CONSENSUS_THRESHOLD = int(os.getenv("CONSENSUS_THRESHOLD", "3"))
+
+# ── Distance Estimation ───────────────────────────────────────────────────────
+
+SHOW_DISTANCE    = os.getenv("SHOW_DISTANCE", "true").lower() == "true"
+FOCAL_LENGTH     = int(os.getenv("FOCAL_LENGTH", "500"))
+KNOWN_FACE_WIDTH = float(os.getenv("KNOWN_FACE_WIDTH", "14.0")) # in cm
 
 # ── RTSP Cameras ──────────────────────────────────────────────────────────────
 
