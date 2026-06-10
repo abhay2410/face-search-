@@ -1,0 +1,33 @@
+# Environments
+.env
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Build & Distribution
+build/
+dist/
+FaceSearch.spec
+
+# Data & Models
+data/
+insightface_models/
+*.index
+
+# Licenses
+*.key
+!license.template
+
+# IDEs
+.vscode/
+.idea/
+.qodo/
+
+# Logs
+*.log

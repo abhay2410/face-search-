@@ -1,0 +1,19 @@
+# ──────────────────────────────────────────────────────────────────────────────
+#  Face Recognition System — Standalone Core (v3.0)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# --- ML & Vision ---
+numpy>=1.26.0
+opencv-python>=4.9.0.80
+onnxruntime-gpu>=1.17.1
+insightface>=0.7.3
+faiss-cpu>=1.8.0
+
+# --- Database & Utils ---
+pyodbc>=5.1.0
+python-dotenv>=1.0.1
+
+# --- API Layer ---
+fastapi>=0.110.0
+uvicorn>=0.28.0
+
